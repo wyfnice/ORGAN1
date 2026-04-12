@@ -17,10 +17,7 @@ from utils import  unloader
 import math
 import torch
 def build_dct_kernel(k_size):
-    """
-    生成任意尺寸 k_size x k_size 的 DCT 变换核
-    返回: (k_size*k_size, 1, k_size, k_size) 的 Tensor
-    """
+  
     filters = np.zeros((k_size * k_size, k_size, k_size))
     for u in range(k_size):
         for v in range(k_size):
@@ -132,33 +129,30 @@ class MultiScaleWavePool(nn.Module):
         super(MultiScaleWavePool, self).__init__()
 
         if out_channels is None:
-            out_channels = in_channels  # 默认输出通道与输入一致，或者是原有逻辑的倍数
+            out_channels = in_channels 
 
-        # --- 分支 1: 2x2 DCT (原有逻辑，关注微观纹理) ---
-        # 2x2 DCT 有 4 个分量 (LL, LH, HL, HH)
+       
         self.k2 = 2
         dct_weights_2 = build_dct_kernel(self.k2)  # Shape: [4, 1, 2, 2]
         self.dct_conv_2 = nn.Conv2d(in_channels, in_channels * (self.k2 ** 2),
                                     kernel_size=2, stride=2, groups=in_channels, bias=False)
         self.dct_conv_2.weight.requires_grad = False
-        # 将 DCT 核扩展到所有通道
+        
         self.dct_conv_2.weight.data = dct_weights_2.repeat(in_channels, 1, 1, 1)
 
-        # --- 分支 2: 4x4 DCT (新增逻辑，关注宏观结构) ---
-        # 4x4 DCT 有 16 个分量
+      
         self.k4 = 4
         dct_weights_4 = build_dct_kernel(self.k4)  # Shape: [16, 1, 4, 4]
-        # 注意：为了保持输出尺寸一致(H/2, W/2)，这里 Stride=2, Padding=1
+       
         self.dct_conv_4 = nn.Conv2d(in_channels, in_channels * (self.k4 ** 2),
                                     kernel_size=4, stride=2, padding=1, groups=in_channels, bias=False)
         self.dct_conv_4.weight.requires_grad = False
         self.dct_conv_4.weight.data = dct_weights_4.repeat(in_channels, 1, 1, 1)
 
-        # --- 融合层 (Feature Fusion) ---
-        # 输入通道数 = (in * 4) + (in * 16) = in * 20
+       
         total_freq_channels = in_channels * (self.k2 ** 2 + self.k4 ** 2)
 
-        # 使用 1x1 卷积学习如何融合不同尺度的频率信息
+      
         self.fusion = nn.Sequential(
             nn.Conv2d(total_freq_channels, out_channels, kernel_size=1, stride=1),
             nn.BatchNorm2d(out_channels),
@@ -166,16 +160,16 @@ class MultiScaleWavePool(nn.Module):
         )
 
     def forward(self, x):
-        # 1. 计算 2x2 频域特征 (Batch, In*4, H/2, W/2)
+       
         feat_2x2 = self.dct_conv_2(x)
 
-        # 2. 计算 4x4 频域特征 (Batch, In*16, H/2, W/2)
+       
         feat_4x4 = self.dct_conv_4(x)
 
-        # 3. 拼接
+     
         feat_concat = torch.cat([feat_2x2, feat_4x4], dim=1)
 
-        # 4. 融合并降维
+      
         out = self.fusion(feat_concat)
 
         return out
@@ -482,22 +476,22 @@ class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
 
-        # 在 Encoder 的 __init__ 中：
+      
 
         self.conv1 = Conv2dBlock(3, 32, 5, 1, 2, norm='bn', activation='lrelu', pad_type='reflect')
-        # 改进：输入32，内部多尺度提取后，投影到64维，以便在 forward 中与 conv2 的结果相加
+      
         self.pool1 = MultiScaleWavePool(32, out_channels=64).cuda()
 
         self.conv2 = Conv2dBlock(32, 64, 3, 2, 1, norm='bn', activation='lrelu', pad_type='reflect')
-        # 改进：输入64 -> 投影到128
+       
         self.pool2 = MultiScaleWavePool(64, out_channels=128).cuda()
 
         self.conv3 = Conv2dBlock(64, 128, 3, 2, 1, norm='bn', activation='lrelu', pad_type='reflect')
-        # 改进：输入128 -> 保持128
+    
         self.pool3 = MultiScaleWavePool(128, out_channels=128).cuda()
 
         self.conv4 = Conv2dBlock(128, 128, 3, 2, 1, norm='bn', activation='lrelu', pad_type='reflect')
-        # 改进：输入128 -> 保持128
+      
         self.pool4 = MultiScaleWavePool(128, out_channels=128).cuda()
 
         self.conv5 = Conv2dBlock(128, 128, 3, 2, 1, norm='bn', activation='lrelu', pad_type='reflect')
@@ -507,31 +501,14 @@ class Encoder(nn.Module):
         x = self.conv1(x)  # (B, 32, 128, 128)
         skips['conv1_1'] = x
 
-        LL1 = self.pool1(x)  # (B, 32, 64, 64) -> 融合了2x2和4x4频率特征
+        LL1 = self.pool1(x)  # (B, 32, 64, 64) -> 
 
-        x = self.conv2(x)  # (B, 64, 64, 64) - 注意：原代码这里 conv2 是 stride 2，可能会再次降采样？
-        # 原代码逻辑：pool1 只是用来计算 LL1 给下一层做加法的，还是直接传给 conv2？
-        # 仔细看原代码：x = self.conv3(x + LL1)。
-        # 这意味着 LL1 的尺寸必须和 x (经过 conv2 后的 x) 一致。
-        # 原代码 conv2 stride=2，输入128 -> 输出64。
-        # 我们的 pool1 stride=2，输入128 -> 输出64。尺寸匹配！
-
-        # ... (后续 forward 逻辑保持不变，因为我们控制了 pool 的输出尺寸和通道) ...
+        x = self.conv2(x)  # (B, 64, 64, 64) -
 
         skips['conv2_1'] = x
         LL2 = self.pool2(x)
 
-        # 这里的残差连接 (x + LL1) 蕴含了频域增强的思想
-        # 注意：原代码中 conv3 输入是 (x + LL1)。
-        # x 是 conv2 输出 (64ch)，LL1 是 pool1 输出。
-        # 如果 conv2 输出 64ch，pool1 也必须输出 64ch 才能相加。
-        # 请根据这一行调整上面的 out_channels。
-        # 如果 conv2(32->64)，那么 x 是 64ch。
-        # 如果 pool1(32->out)，那么 LL1 是 out ch。
-        # 所以 pool1 的 out_channels 应该设为 64，而不是 32！
-
-        # --- 修正后的参数初始化 ---
-        # 请回到上面的 __init__ 修改 out_channels 参数：
+      
         # self.pool1 = MultiScaleWavePool(32, out_channels=64).cuda()
         # self.pool2 = MultiScaleWavePool(64, out_channels=128).cuda()
         # self.pool3 = MultiScaleWavePool(128, out_channels=128).cuda() # conv4 out is 128
